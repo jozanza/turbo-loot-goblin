@@ -1,0 +1,17 @@
+[package]
+name = "turbo-loot-goblin"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+turbo = { version = ">=0.3.8", package = "turbo-genesis-sdk", features = ["solana"] }
+# turbo = { path = "../turbo-genesis-sdk", package = "turbo-genesis-sdk", features = ["solana"] }
+loot_goblin = { path = "../loot-goblin/programs/loot-goblin", package = "loot-goblin" }
+
+[patch.crates-io]
+cc = { git = "https://github.com/jozanza/cc-rs.git", branch = "wasm-patch" }
+
+[lib]
+crate-type = ["cdylib"]
+
+[workspace]
