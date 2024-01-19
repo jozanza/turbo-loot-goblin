@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
-    ops::DerefMut,
-};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use loot_goblin::{EventOutcome, Game};
 use turbo::solana::{
@@ -54,11 +51,26 @@ turbo::init! {
                 }),
                 PhaseActionSection(enum PhaseActionSectionEvent {
                     Camp(enum CampPhaseAction {
-                        Rummage,
+                        RummageStart,
+                        RummageEnd,
+                        RummageConfirmFailure,
+                        RummageConfirmSuccess(bool),
                         Bribe,
-                        Continue,
-                        OK,
+                        ContinueStart,
+                        ContinueEnd,
                         BackToDefaultMenu,
+                    })
+                    Event(enum EventPhaseAction {
+                        TakeRisk,
+                        TakeRiskEnd,
+                        PlayItSafe,
+                        PlayItSafeEnd,
+                        ConfirmOutcome(bool),
+                        KeepGoingStart,
+                        KeepGoingEnd,
+                        TakeABreakStart,
+                        TakeABreakEnd,
+
                     })
                 })
             }>,
@@ -108,7 +120,7 @@ turbo::go! {
     clear(0x000000ff);
 
     if None == state.adventure {
-        sprite!("title_menu_bg");
+        sprite!("title_bg_2");
         if mouse(0).left.just_released() {
             let _ = state.adventure.insert(Adventure::new(solana::user_pubkey()));
         }
@@ -154,10 +166,10 @@ turbo::go! {
                                     goblins.insert(*player, Goblin::new());
                                 };
                             }
-                            text!(&format!("{:?} (CPU)", player), x = x + 4, y = y + 4, color = FG);
+                            text!(&format!("{:?}", player), x = x + 4, y = y + 4, color = FG);
                         } else {
                             // ibutton(Font::M, x + 1, y + 61, "   YOU   ");
-                            text!(&format!("{:?} (YOU)", player), x = x + 4, y = y + 4, color = FG);
+                            text!(&format!("{:?}", player), x = x + 4, y = y + 4, color = FG);
                         }
                     }
                     let y = y + 96;
@@ -192,7 +204,7 @@ turbo::go! {
                         turbo::println!("START");
                         if adventure.start_adventure().is_ok() {
                             // adventure.phase = AdventurePhase::CallToAction(settings.clone());
-                            state.gui.open_goblin_dialog(Player::P1, GOBLIN_DIALOG_CAMP_DEFAULT, None);
+                            state.gui.open_goblin_dialog(Player::P1, "Blimey, a proper camp, it is! I'll be snaggin' more than a few shinies 'round here, I bet!", None);
                         }
                     };
                 }
@@ -236,19 +248,58 @@ turbo::go! {
                 AdventureState::Started(goblins, settings, turn, phase) => {
                     // Phase Actions Section
                     match phase {
+                        AdventurePhase::Event(event_phase) => {
+
+                            let num_scenarios = 8;
+                            if gamepad(0).up.just_pressed() {
+                                event_phase.scenario = (event_phase.scenario - 1).min(num_scenarios - 1) % num_scenarios;
+                            }
+                            if gamepad(0).down.just_pressed() {
+                                event_phase.scenario = (event_phase.scenario + 1) % num_scenarios;
+                            }
+
+                            if gamepad(0).left.just_pressed() {
+                                event_phase.location = EventLocation::ALL[event_phase.location.prev()];
+                            }
+                            if gamepad(0).right.just_pressed() {
+                                event_phase.location = EventLocation::ALL[event_phase.location.next()];
+                            }
+
+                            let data = event_phase.location.data();
+                            let image = data.images[0];
+                            sprite!(image);
+
+                            if let Some(event) = state.gui.phase_actions_section.draw_event_actions(&event_phase) {
+                                if !state.gui.is_overlay_open() {
+                                    let event = PhaseActionSectionEvent::Event(event);
+                                    // turbo::println!("event {:?}", event);
+                                    state.gui.dispatch(Command::PhaseActionSection(event));
+                                }
+                            }
+                        }
                         AdventurePhase::Camp(camp_phase) => {
+                            sprite!("camp");
                             if let Some(event) = state.gui.phase_actions_section.draw_camp_actions(&camp_phase) {
-                                let event = PhaseActionSectionEvent::Camp(event);
-                                turbo::println!("event {:?}", event);
-                                state.gui.dispatch(Command::PhaseActionSection(event));
+                                if !state.gui.is_overlay_open() {
+                                    let event = PhaseActionSectionEvent::Camp(event);
+                                    // turbo::println!("event {:?}", event);
+                                    state.gui.dispatch(Command::PhaseActionSection(event));
+                                }
                             }
                         }
                     }
 
                     // Goblin List
                     if let Some(event) = state.gui.goblin_list.draw(&goblins, &settings.goblin_order, &turn) {
-                        turbo::println!("event {:?}", event);
-                        state.gui.dispatch(Command::GoblinList(event));
+                        if !state.gui.is_overlay_open() {
+                            // turbo::println!("event {:?}", event);
+                            match event {
+                                GoblinListEvent::OpenGoblinDialog(player) if player != turn.player => {
+                                    // don't open goblin dialogs for non-active goblins
+                                }
+                                _ => state.gui.dispatch(Command::GoblinList(event)),
+                            }
+                        }
                     }
 
                     // Goblin Loot Inspector
@@ -262,40 +313,157 @@ turbo::go! {
                     // Goblin Dialog
                     if let Some(ref mut dialog) = state.gui.goblin_dialog {
                         if let Some(event) = dialog.draw() {
-                            turbo::println!("event {:?}", event);
+                            // turbo::println!("event {:?}", event);
                             state.gui.dispatch(Command::GoblinDialog(event));
                         }
                     }
 
-                    // Consume GUI Commands
-                    enum SideEffect {
-                        RummageForLoot,
+                    // Actions can be a side-effect of GUI commands
+                    enum Action {
+                        CampRummageForLoot,
+                        CampRummageTakeLoot,
+                        CampRummageLeaveLoot,
+                        EventStart,
+                        EventTakeRisk,
+                        EventPlayItSafe,
+                        EventHandleOutcome,
+                        KeepGoing,
+                        TakeABreak,
                     }
-                    let mut side_effect = None;
+                    let mut action = None;
+
+                    // Consume GUI Commands
                     let mut cmd = state.gui.commands.pop_front();
                     while cmd != None {
-                        match cmd.clone() {
+                        turbo::println!("{:?}", cmd);
+                        match cmd.take() {
                             Some(Command::PhaseActionSection(e)) => match e {
+                                PhaseActionSectionEvent::Event(e) => match e {
+                                    EventPhaseAction::PlayItSafe => {
+                                        let event = PhaseActionSectionEvent::Event(EventPhaseAction::PlayItSafeEnd);
+                                        let cmd = Command::PhaseActionSection(event);
+                                        let msg = match phase {
+                                            AdventurePhase::Event(event_phase) => {
+                                                let [_risky, safe] = &event_phase.location.data().scenarios[event_phase.scenario].actions;
+                                                safe.dialog
+                                            }
+                                            _ => "Better not risk it..."
+                                        };
+                                        state.gui.open_goblin_dialog(turn.player, msg, Some(cmd));
+                                    }
+                                    EventPhaseAction::PlayItSafeEnd => {
+                                        action = Some(Action::EventPlayItSafe);
+                                    }
+                                    EventPhaseAction::TakeRisk => {
+                                        let event = PhaseActionSectionEvent::Event(EventPhaseAction::TakeRiskEnd);
+                                        let cmd = Command::PhaseActionSection(event);
+                                        let msg = match phase {
+                                            AdventurePhase::Event(event_phase) => {
+                                                let [risky, _safe] = &event_phase.location.data().scenarios[event_phase.scenario].actions;
+                                                risky.dialog
+                                            }
+                                            _ => "Fuck it, we ball!"
+                                        };
+                                        state.gui.open_goblin_dialog(turn.player, msg, Some(cmd));
+                                    }
+                                    EventPhaseAction::TakeRiskEnd => {
+                                        action = Some(Action::EventTakeRisk);
+                                    }
+                                    EventPhaseAction::ConfirmOutcome(should_handle_outcome) => {
+                                        if should_handle_outcome {
+                                            action = Some(Action::EventHandleOutcome);
+                                        } else {
+                                            let event = PhaseActionSectionEvent::Event(EventPhaseAction::ConfirmOutcome(true));
+                                            let cmd = Command::PhaseActionSection(event);
+                                            let msg = match phase {
+                                                AdventurePhase::Event(event_phase) => {
+                                                    if let Some((action_index, result_index, _accepted)) = &event_phase.result {
+                                                        let action = &event_phase.location.data().scenarios[event_phase.scenario].actions[*action_index];
+                                                        action.outcomes[*result_index].dialog
+                                                    } else {
+                                                        continue
+                                                    }
+                                                }
+                                                _ => continue,
+                                            };
+                                            state.gui.open_goblin_dialog(turn.player, msg, Some(cmd));
+                                        }
+                                    }
+                                    EventPhaseAction::KeepGoingStart => {
+                                        let event = PhaseActionSectionEvent::Event(EventPhaseAction::KeepGoingEnd);
+                                        let cmd = Command::PhaseActionSection(event);
+                                        let msg = KEEP_GOING_DIALOG[rand() as usize % KEEP_GOING_DIALOG.len()];
+                                        state.gui.open_goblin_dialog(turn.player, msg, Some(cmd));
+                                    }
+                                    EventPhaseAction::KeepGoingEnd => {
+                                        action = Some(Action::KeepGoing);
+                                    }
+                                    EventPhaseAction::TakeABreakStart => {
+                                        let event = PhaseActionSectionEvent::Event(EventPhaseAction::TakeABreakEnd);
+                                        let cmd = Command::PhaseActionSection(event);
+                                        let msg = TAKE_A_BREAK_DIALOG[rand() as usize % TAKE_A_BREAK_DIALOG.len()];
+                                        state.gui.open_goblin_dialog(turn.player, msg, Some(cmd));
+                                    }
+                                    EventPhaseAction::TakeABreakEnd => {
+                                        action = Some(Action::TakeABreak);
+                                    }
+                                }
                                 PhaseActionSectionEvent::Camp(e) => match e {
-                                    CampPhaseAction::Rummage => {
-                                        // if adventure.rummage_for_loot().is_err() {
-                                        //     turbo::println!("Couldn't rummage");
-                                        // } else {
-                                        //     state.gui.phase_actions_section.camp = CampActionMenu::RummageResult;
-                                        // }
-                                        side_effect = Some(SideEffect::RummageForLoot);
+                                    CampPhaseAction::RummageStart => {
+                                        let event = PhaseActionSectionEvent::Camp(CampPhaseAction::RummageEnd);
+                                        let cmd = Command::PhaseActionSection(event);
+                                        let msg = "Time for a little 'unofficial inventory check'. Let's see what goodies won't be missed, shall we?";
+                                        state.gui.open_goblin_dialog(turn.player, msg, Some(cmd));
+                                    }
+                                    CampPhaseAction::RummageEnd => {
+                                        action = Some(Action::CampRummageForLoot);
                                         state.gui.phase_actions_section.camp = CampActionMenu::RummageResult;
+                                    }
+                                    CampPhaseAction::RummageConfirmFailure => {
+                                        let msg = match phase {
+                                            AdventurePhase::Camp(camp_phase) => match &camp_phase.rummage_result {
+                                                Some(RummageResult::Fail) => "J-Just makin' sure everything's accounted for, I swear!",
+                                                _ => "..."
+                                            }
+                                            _ => "..."
+                                        };
+                                        let event = PhaseActionSectionEvent::Camp(CampPhaseAction::BackToDefaultMenu);
+                                        let cmd = Command::PhaseActionSection(event);
+                                        state.gui.open_goblin_dialog(turn.player, msg, Some(cmd));
+                                    }
+                                    CampPhaseAction::RummageConfirmSuccess(did_take_loot) => {
+                                        let msg = match phase {
+                                            AdventurePhase::Camp(camp_phase) => match &camp_phase.rummage_result {
+                                                Some(RummageResult::Success { .. })=> {
+                                                    if did_take_loot {
+                                                        action = Some(Action::CampRummageTakeLoot);
+                                                        "Heh, what have we here? A few sparklies for me pockets! No one's the wiser, right?"
+                                                    } else {
+                                                        action = Some(Action::CampRummageLeaveLoot);
+                                                        "Maybe not this time... Better not push me luck too far, eh?"
+                                                    }
+                                                },
+                                                _ => "..."
+                                            }
+                                            _ => "..."
+                                        };
+                                        let event = PhaseActionSectionEvent::Camp(CampPhaseAction::BackToDefaultMenu);
+                                        let cmd = Command::PhaseActionSection(event);
+                                        state.gui.open_goblin_dialog(turn.player, msg, Some(cmd));
                                     }
                                     CampPhaseAction::Bribe => {
                                         // TODO
+                                        let msg = "Heh, Jozanza's still working on that option. Let's try something else...";
+                                        state.gui.open_goblin_dialog(turn.player, msg, None);
                                     }
-                                    CampPhaseAction::Continue => {
-                                        // TODO
-                                    }
-                                    CampPhaseAction::OK => {
-                                        let event = PhaseActionSectionEvent::Camp(CampPhaseAction::BackToDefaultMenu);
+                                    CampPhaseAction::ContinueStart => {
+                                        let event = PhaseActionSectionEvent::Camp(CampPhaseAction::ContinueEnd);
                                         let cmd = Command::PhaseActionSection(event);
-                                        state.gui.open_goblin_dialog(turn.player, "Well, fuck...", Some(cmd));
+                                        let msg = KEEP_GOING_DIALOG[rand() as usize % KEEP_GOING_DIALOG.len()];
+                                        state.gui.open_goblin_dialog(turn.player, msg, Some(cmd));
+                                    }
+                                    CampPhaseAction::ContinueEnd => {
+                                        action = Some(Action::EventStart);
                                     }
                                     CampPhaseAction::BackToDefaultMenu => {
                                         state.gui.phase_actions_section.camp = CampActionMenu::Default;
@@ -304,14 +472,16 @@ turbo::go! {
                             }
                             Some(Command::GoblinList(e)) => match e {
                                 GoblinListEvent::OpenGoblinDialog(player) => {
-                                    if !state.gui.is_overlay_open() && player == turn.player {
-                                        state.gui.open_goblin_dialog(player, GOBLIN_DIALOG_CAMP_DEFAULT, None);
-                                    }
+                                    let msg = match phase {
+                                        AdventurePhase::Event(event_phase) => {
+                                            event_phase.location.data().dialog
+                                        }
+                                        _ => GOBLIN_DIALOG_CAMP_DEFAULT
+                                    };
+                                    state.gui.open_goblin_dialog(player, msg, None);
                                 }
                                 GoblinListEvent::OpenGoblinLootInspector(player) => {
-                                    if !state.gui.is_overlay_open() {
-                                        state.gui.open_goblin_loot_inspector(player);
-                                    }
+                                    state.gui.open_goblin_loot_inspector(player);
                                 }
                             }
                             Some(Command::GoblinDialog(e)) => match e {
@@ -319,7 +489,7 @@ turbo::go! {
                                     cmd = state.gui.close_goblin_dialog();
                                 }
                                 GoblinDialogEvent::FastForward => {
-                                    // TODO
+                                    state.gui.fast_forward_goblin_dialog();
                                 }
                                 GoblinDialogEvent::Next => {
                                     // TODO
@@ -339,14 +509,52 @@ turbo::go! {
                         }
                     }
                     state.gui.commands.clear();
-                    if let Some(e) = side_effect {
-                        if let SideEffect::RummageForLoot = e {
+                    match action {
+                        Some(Action::CampRummageForLoot) => {
                             if adventure.rummage_for_loot().is_err() {
                                 turbo::println!("Couldn't rummage");
                             }
                         }
+                        Some(Action::CampRummageTakeLoot) => {
+                            //
+                        }
+                        Some(Action::CampRummageLeaveLoot) => {
+                            //
+                        }
+                        Some(Action::EventStart) => {
+                            if adventure.event_start().is_err() {
+                                turbo::println!("Couldn't start event");
+                            }
+                        }
+                        Some(Action::EventTakeRisk) => {
+                            if adventure.event_make_choice(0).is_err() {
+                                turbo::println!("Couldn't take risk");
+                            }
+                        }
+                        Some(Action::EventPlayItSafe) => {
+                            if adventure.event_make_choice(1).is_err() {
+                                turbo::println!("Couldn't play it safe");
+                            }
+                        }
+                        Some(Action::EventHandleOutcome) => {
+                            if adventure.event_handle_outcome(1).is_err() {
+                                turbo::println!("Couldn't handle outcome");
+                            }
+                        }
+                        Some(Action::KeepGoing) => {
+                            if adventure.keep_going().is_err() {
+                                turbo::println!("Couldn't keep going");
+                            }
+                        }
+                        Some(Action::TakeABreak) => {
+                            if adventure.take_a_break().is_err() {
+                                turbo::println!("Couldn't take a break");
+                            }
+                        }
+                        None => {
+                            // noop
+                        }
                     }
-                    // *adventure = next_adventure;
                 }
                 AdventureState::Complete(_goblins, _settings) => {
                     //
@@ -377,7 +585,7 @@ turbo::go! {
     let gp = gamepad(0);
     match state.screen {
         Screen::TitleMenu => {
-            sprite!("title_menu_bg", fps = 0);
+            sprite!("title_bg_1", fps = 0);
             let [w, h] = resolution();
             if user_pubkey == Pubkey::default() {
                 let msg = "Please connect your wallet...";
@@ -839,216 +1047,6 @@ fn draw_top_panel(game: &Game, msg: &str) {
     sprite!(goblin_key, x = 1, y = 0);
     set_camera(38, 4);
     text!(msg);
-}
-
-fn draw_goblin_dialog(player: Player, max_len: usize, msg: &str) -> bool {
-    set_camera(0, 0);
-    let [w, h] = resolution();
-    rect!(w = w, h = h, fill = 0x000000dd);
-    let x = 0;
-    let y = h as i32 - 32;
-    let did_click = cdiv(w, 32, x, y, BLACK, 0xffffffaa);
-
-    #[rustfmt::skip]
-    let goblin_key = &format!("goblin_{}", match player {
-        Player::P1 => 1,
-        Player::P2 => 2,
-        Player::P3 => 3,
-        Player::P4 => 4,
-    });
-    // sprite!(goblin_key, x = x, y = y);
-    sprite!("goblin_portrait", x = x, y = y - 32);
-
-    let fg = WHITE;
-    let bg = BLACK;
-    circ!(d = 26, x = -10, y = y + 32 - 14, fill = bg);
-    circ!(d = 26, x = -12, y = y + 32 - 12, fill = fg);
-    text!(
-        &format!("{:?}", player),
-        x = 1,
-        y = y + 25,
-        font = Font::S,
-        color = bg
-    );
-
-    let x = x + 66;
-    let y = y + 5;
-    let msg = insert_line_breaks(msg, 36);
-    let msg = &msg[0..max_len.min(msg.len())];
-    text!(msg, x = x, y = y, color = WHITE);
-    if (max_len / 16) % 2 == 0 {
-        circ!(d = 2, x = x + 3 + (36 * 5), y = y + 20, fill = WHITE);
-    }
-    did_click
-}
-
-#[derive(Debug)]
-enum GoblinLootBagEvent {
-    Close(Player),
-    InspectLoot(Player, usize),
-}
-
-fn draw_goblin_loot_bag(player: Player, goblin: &Goblin) -> Option<GoblinLootBagEvent> {
-    let mut event = None;
-    set_camera(0, 0);
-    let [w, h] = resolution();
-    // rect!(w = w, h = h, fill = 0x000000dd);
-    if cdiv(w, h - 48, 0, 0, 0x000000dd, 0x000000dd) {
-        let _ = event.insert(GoblinLootBagEvent::Close(player));
-    }
-    let mut x = 0;
-    let mut y = h as i32 - 48;
-    let top = y;
-    cdiv(w, 48, x, y, BLACK, WHITE);
-    y = h as i32;
-
-    #[rustfmt::skip]
-    let goblin_key = &format!("goblin_{}", match player {
-        Player::P1 => 1,
-        Player::P2 => 2,
-        Player::P3 => 3,
-        Player::P4 => 4,
-    });
-    // sprite!(goblin_key, x = x, y = y);
-    y -= 56;
-    sprite!("sack", x = x, y = y);
-    y = h as i32;
-
-    let fg = WHITE;
-    let bg = BLACK;
-    x -= 10;
-    y -= 14;
-    circ!(d = 26, x = x, y = y, fill = bg);
-    x -= 2;
-    y += 2;
-    circ!(d = 26, x = x, y = y, fill = fg);
-    x += 3;
-    text!(
-        &format!("{:?}", player),
-        x = 1,
-        y = h as i32 - 7,
-        font = Font::S,
-        color = bg
-    );
-
-    y = top + 5;
-    x = 66;
-    text!("LOOT BAG", x = x, y = y, color = WHITE);
-    y += 10;
-    for i in 0..26 {
-        let cols = 13;
-        let w = 14;
-        let h = 14;
-        let x = x + (i % cols) * w as i32;
-        let y = y + (i / cols) * h as i32;
-        // rect!(w = w - 1, h = h - 1, x = x, y = y, fill = 0xffffff66);
-        if cdiv(w - 1, h - 1, x, y, 0xffffff33, TRANSPARENT) {
-            let _ = event.insert(GoblinLootBagEvent::InspectLoot(player, i as usize));
-        }
-    }
-
-    event
-}
-
-#[derive(Debug)]
-enum GoblinStatsEvent {
-    InspectImage(Player),
-    InspectBag(Player),
-}
-
-fn draw_goblin_stats(
-    goblins: &GoblinMap,
-    goblin_order: &GoblinOrder,
-    turn: &Turn,
-) -> Option<GoblinStatsEvent> {
-    set_camera(0, 0);
-    text!(
-        &format!(
-            "DEBUG:\n{:#?}\nGoblinOrder {:#?}",
-            turn,
-            sort_hashmap(goblin_order)
-        ),
-        x = 4,
-        y = 4,
-        font = Font::S,
-        color = 0x333333ff
-    );
-
-    let mut event = None;
-    let [w, h] = resolution();
-    let mut x = 0;
-    let mut y = 128;
-    // cdiv(127, h, x, y, TRANSPARENT, WHITE);
-    x += 7;
-    // y += 4;
-    // text!("CAMP", x = x, y = y, font = Font::L);
-    // y += 12;
-    for i in 0..4 {
-        let player = goblin_order.get(&i);
-        if player.is_none() {
-            break;
-        }
-        let player = player.unwrap();
-        #[rustfmt::skip]
-        let goblin_key = &format!("goblin_{}", match player {
-            Player::P1 => 1,
-            Player::P2 => 2,
-            Player::P3 => 3,
-            Player::P4 => 4,
-        });
-        sprite!(goblin_key, x = x, y = y);
-        if cdiv(32, 32, x, y, TRANSPARENT, TRANSPARENT) {
-            let _ = event.insert(GoblinStatsEvent::InspectImage(*player));
-        }
-        let prev_x = x;
-        let top = y;
-        x += 36;
-        y += 6;
-        let goblin = &goblins[&player];
-        let attributes = [
-            ("player", &format!("{:?}", player)),
-            ("health", &goblin.health.to_string()),
-            ("luck  ", &goblin.luck.to_string()),
-            ("greed ", &goblin.greed.to_string()),
-            // ("wealth", &goblin.loot_bag.iter().sum::<u8>().to_string()),
-        ];
-        for (key, val) in attributes {
-            let key = key.to_ascii_uppercase();
-            text!(&format!("{key}: {:0>2}", val), font = Font::S, x = x, y = y);
-            y += 6;
-        }
-        let prev_y = y;
-        x += 54;
-        y = top + 5;
-        rect!(w = 1, h = 24, x = x, y = y, fill = 0xffffff33);
-        x += 5;
-        y += 1;
-        // text!("LOOT", x = x, y = y, font = Font::S, color = WHITE);
-        // y += 8;
-        text!("$000", x = x, y = y, font = Font::M, color = WHITE);
-        y += 10;
-        if cbutton(Font::S, x, y, None, BLACK, WHITE, BLACK, "BAG") {
-            let _ = event.insert(GoblinStatsEvent::InspectBag(*player));
-        }
-        x = prev_x;
-        y = prev_y + 2;
-        // y = prev_y;
-        if turn.player == *player {
-            cdiv(120, 31, prev_x, top + 1, TRANSPARENT, WHITE);
-            rect!(w = 5, h = 31, x = x - 6, y = top + 1, fill = WHITE);
-            text!(
-                "A\nC\nT\nI\nV\nE",
-                font = Font::S,
-                x = x - 5,
-                y = top + 2,
-                color = BLACK
-            );
-        }
-        // rect!(w = 120, h = 32, x = x, y = y);
-        // y += 36;
-    }
-
-    event
 }
 
 fn draw_left_panel(game: &Game) {
@@ -1521,6 +1519,9 @@ fn draw_cursor() {
 const BLACK: u32 = 0x000000ff;
 const WHITE: u32 = 0xffffffff;
 const MAGENTA: u32 = 0xff00ffff;
+const RED: u32 = 0xff0000ff;
+const GREEN: u32 = 0x00ff00ff;
+const BACKDROP: u32 = 0x000000ee;
 const TRANSPARENT: u32 = 0x00000000;
 const FG: u32 = 0x472e1fff;
 const BG: u32 = 0xdbb886ff;
@@ -1545,7 +1546,6 @@ where
     tree_map
 }
 
-const GOBLIN_DIALOG_CAMP_DEFAULT: &'static str =
-    "Not my fault they left their sack of loot unattended. A goblin must do what a goblin must do!";
+const GOBLIN_DIALOG_CAMP_DEFAULT: &'static str = "Ain't me fault they left their sack of loot unattended. A goblin must do what a goblin must do!";
 
 const PHASE_ACTION_DESC_CAMP_DEFAULT: &'static str = "The flickering campfire casts a warm glow, offering a brief respite from the adventurers' relentless journey...";
