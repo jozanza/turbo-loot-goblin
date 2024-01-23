@@ -4,10 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-turbo = { version = ">=0.3.9", package = "turbo-genesis-sdk", features = ["solana"] }
-# turbo = { path = "../turbo-genesis-sdk", package = "turbo-genesis-sdk", features = ["solana"] }
-loot_goblin = { path = "../loot-goblin/programs/loot-goblin", package = "loot-goblin" }
-# anchor-lang = "0.28.0"
+turbo = { version = ">=0.3.10", package = "turbo-genesis-sdk", features = ["solana"] }
 
 [patch.crates-io]
 cc = { git = "https://github.com/jozanza/cc-rs.git", branch = "wasm-patch" }

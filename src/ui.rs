@@ -3,6 +3,20 @@ use std::collections::HashMap;
 use super::*;
 
 ////////////////////////////////////////////////////////////////////////////////
+// Constants
+////////////////////////////////////////////////////////////////////////////////
+
+pub const BLACK: u32 = 0x000000ff;
+pub const WHITE: u32 = 0xffffffff;
+pub const MAGENTA: u32 = 0xff00ffff;
+pub const RED: u32 = 0xff0000ff;
+pub const GREEN: u32 = 0x00ff00ff;
+pub const BACKDROP: u32 = 0x000000ee;
+pub const TRANSPARENT: u32 = 0x00000000;
+pub const FG: u32 = 0x472e1fff;
+pub const BG: u32 = 0xdbb886ff;
+
+////////////////////////////////////////////////////////////////////////////////
 // Graphical User Interface
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -61,13 +75,14 @@ impl PhaseActionsSection {
         let mut x = 128;
         let mut y = 0;
 
+        // Event location data
+        let data = &ALL_EVENT_LOCATION_DATA[event_phase.location % ALL_EVENT_LOCATION_DATA.len()];
+
         // Background
         let [_w, h] = resolution();
         rect!(w = 128, h = h, x = x, y = y, fill = 0x000303ff);
         x += 4;
         y += 8;
-
-        let data = event_phase.location.data();
 
         // Title
         let msg = &insert_line_breaks(data.name, Self::MAX_FONT_L_LINE_LEN);
@@ -91,10 +106,14 @@ impl PhaseActionsSection {
         y += 8;
 
         // Actions - Action taken
-        if let Some((action_index, result_index, accepted)) = &event_phase.result {
-            let action =
-                &event_phase.location.data().scenarios[event_phase.scenario].actions[*action_index];
-            let outcome = &action.outcomes[*result_index];
+        if let Some(EventPhaseOutcome {
+            choice,
+            effect,
+            accepted,
+        }) = &event_phase.outcome
+        {
+            let action = &data.scenarios[event_phase.scenario].actions[*choice];
+            let outcome = &action.outcomes[*effect];
             let is_good_outcome = outcome.effect.is_good();
 
             let msg = &outcome.effect.desc().to_ascii_uppercase();
@@ -138,11 +157,10 @@ impl PhaseActionsSection {
         }
 
         // Actions - No action taken
-        let [risky, safe] = &scenario.actions;
         #[rustfmt::skip]
         let actions = [
-            (EventPhaseAction::TakeRisk, risky),
-            (EventPhaseAction::PlayItSafe, safe),
+            (EventPhaseAction::TakeRisk, &scenario.actions[0]),
+            (EventPhaseAction::PlayItSafe, &scenario.actions[1]),
         ];
         for (action, a) in actions {
             if cbutton(Font::S, x, y, Some(128 - 16), BLACK, WHITE, WHITE, a.label) {
@@ -273,7 +291,6 @@ impl GoblinList {
         let mut event = None;
 
         set_camera(0, 0);
-        let [w, h] = resolution();
         let mut x = 0;
         let mut y = 128;
         x += 7;
@@ -316,7 +333,15 @@ impl GoblinList {
             rect!(w = 1, h = 24, x = x, y = y, fill = 0xffffff33);
             x += 5;
             y += 1;
-            text!("$000", x = x, y = y, font = Font::M, color = WHITE);
+            let total_loot_value = goblin.loot.iter().fold(0, |acc, loot| match loot.rarity {
+                Rarity::Common => acc + 1,
+                Rarity::Uncommon => acc + 2,
+                Rarity::Rare => acc + 3,
+                Rarity::Legendary => acc + 4,
+                Rarity::Epic => acc + 5,
+            });
+            let msg = &format!("${:0>3}", total_loot_value);
+            text!(msg, x = x, y = y, font = Font::M, color = WHITE);
             y += 10;
             if cbutton(Font::S, x - 1, y, None, BLACK, WHITE, BLACK, "BAG") {
                 event = Some(GoblinListEvent::OpenGoblinLootInspector(*player));
@@ -433,14 +458,6 @@ impl GoblinLootInspector {
         cdiv(w, 48, x, y, BLACK, WHITE);
         y = h as i32;
 
-        #[rustfmt::skip]
-        let goblin_key = &format!("goblin_{}", match self.player {
-            Player::P1 => 1,
-            Player::P2 => 2,
-            Player::P3 => 3,
-            Player::P4 => 4,
-        });
-        // sprite!(goblin_key, x = x, y = y);
         y -= 56;
         sprite!("sack", x = x, y = y);
         y = h as i32;
@@ -453,7 +470,8 @@ impl GoblinLootInspector {
         x -= 2;
         y += 2;
         circ!(d = 26, x = x, y = y, fill = fg);
-        x += 3;
+        #[allow(unused_assignments)]
+        { x += 3; }
         text!(
             &format!("{:?}", self.player),
             x = 1,
@@ -464,7 +482,10 @@ impl GoblinLootInspector {
 
         y = top + 5;
         x = 66;
-        text!("LOOT BAG", x = x, y = y, color = WHITE);
+
+        let goblin = &goblins[&self.player];
+        let msg = &format!("LOOT BAG ({})", goblin.loot.len());
+        text!(msg, x = x, y = y, color = WHITE);
         y += 10;
         for i in 0..26 {
             let cols = 13;
@@ -476,6 +497,25 @@ impl GoblinLootInspector {
             if cdiv(w - 1, h - 1, x, y, 0xffffff33, TRANSPARENT) {
                 let _ = event.insert(GoblinLootInspectorEvent::SelectLoot(i as usize));
             }
+            if let Some(loot) = goblin.loot.get(i as usize) {
+                match loot.rarity {
+                    Rarity::Common => {
+                        sprite!("loot_1", x = x, y = y);
+                    }
+                    Rarity::Uncommon => {
+                        sprite!("loot_2", x = x, y = y);
+                    }
+                    Rarity::Rare => {
+                        sprite!("loot_3", x = x, y = y);
+                    }
+                    Rarity::Legendary => {
+                        sprite!("loot_4", x = x, y = y);
+                    }
+                    Rarity::Epic => {
+                        sprite!("loot_5", x = x, y = y);
+                    }
+                }
+            }
         }
 
         return event;
@@ -483,7 +523,7 @@ impl GoblinLootInspector {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// UI Primitives
+// Utils
 ////////////////////////////////////////////////////////////////////////////////
 
 pub fn cbutton(
@@ -617,4 +657,41 @@ pub fn idiv(w: u32, h: u32, x: i32, y: i32) -> bool {
     let [mx, my] = m.position;
     let did_intersect = mx >= x && mx < (x + w as i32) && my >= y && my < (y + h as i32);
     did_intersect && m.left.just_pressed()
+}
+
+pub fn draw_cursor() {
+    set_camera(0, 0);
+    let m = mouse(0);
+    let [mx, my] = m.position;
+    if m.left.just_pressed() || m.left.pressed() {
+        sprite!("cursor_grab", x = mx - 6, y = my - 3);
+    } else {
+        sprite!("cursor", x = mx - 6, y = my - 2);
+    }
+}
+
+fn insert_line_breaks(input: &str, max_line_length: usize) -> String {
+    let mut result = String::new();
+    let mut current_line_length = 0;
+
+    for word in input.split_whitespace() {
+        let word_length = word.chars().count();
+
+        // Check if adding this word would exceed the line length
+        if current_line_length + word_length > max_line_length {
+            result.push('\n');
+            current_line_length = 0;
+        }
+
+        // Add a space before the word if it's not at the start of a line
+        if current_line_length > 0 {
+            result.push(' ');
+            current_line_length += 1;
+        }
+
+        result.push_str(word);
+        current_line_length += word_length;
+    }
+
+    result
 }
